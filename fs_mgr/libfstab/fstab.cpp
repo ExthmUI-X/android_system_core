@@ -147,6 +147,29 @@ void ParseMountFlags(const std::string& flags, FstabEntry* entry) {
     entry->fs_options = std::move(fs_options);
 }
 
+void ParseUserDevices(const std::string& arg, FstabEntry* entry) {
+    auto param = Split(arg, ":");
+    if (param.size() != 2) {
+        LWARNING << "Warning: device= malformed: " << arg;
+        return;
+    }
+
+    if (access(param[1].c_str(), F_OK) != 0) {
+        LWARNING << "Warning: device does not exist : " << param[1];
+        return;
+    }
+
+    if (param[0] == "zoned") {
+        // atgc in f2fs does not support a zoned device
+        auto options = Split(entry->fs_options, ",");
+        options.erase(std::remove(options.begin(), options.end(), "atgc"), options.end());
+        entry->fs_options = android::base::Join(options, ",");
+        LINFO << "Removed ATGC in fs_options as " << entry->fs_options << " for zoned device";
+        entry->fs_mgr_flags.is_zoned = true;
+    }
+    entry->user_devices.push_back(param[1]);
+}
+
 bool ParseFsMgrFlags(const std::string& flags, FstabEntry* entry) {
     for (const auto& flag : Split(flags, ",")) {
         if (flag.empty() || flag == "defaults") continue;
@@ -287,6 +310,10 @@ bool ParseFsMgrFlags(const std::string& flags, FstabEntry* entry) {
             }
         } else if (StartsWith(flag, "avb_keys=")) {  // must before the following "avb"
             entry->avb_keys = arg;
+        } else if (StartsWith(flag, "avb_hashtree_digest=")) {
+            // "avb_hashtree_digest" must before the following "avb"
+            // The path where hex-encoded hashtree descriptor root digest is located.
+            entry->avb_hashtree_digest = arg;
         } else if (StartsWith(flag, "avb")) {
             entry->fs_mgr_flags.avb = true;
             entry->vbmeta_partition = arg;
@@ -308,17 +335,8 @@ bool ParseFsMgrFlags(const std::string& flags, FstabEntry* entry) {
             if (!ParseByteCount(arg, &entry->zram_backingdev_size)) {
                 LWARNING << "Warning: zram_backingdev_size= flag malformed: " << arg;
             }
-        } else if (flag == "zoned_device") {
-            if (access("/dev/block/by-name/zoned_device", F_OK) == 0) {
-                entry->zoned_device = "/dev/block/by-name/zoned_device";
-
-                // atgc in f2fs does not support a zoned device
-                auto options = Split(entry->fs_options, ",");
-                options.erase(std::remove(options.begin(), options.end(), "atgc"), options.end());
-                entry->fs_options = android::base::Join(options, ",");
-                LINFO << "Removed ATGC in fs_options as " << entry->fs_options
-                      << " for zoned device=" << entry->zoned_device;
-            }
+        } else if (StartsWith(flag, "device=")) {
+            ParseUserDevices(arg, entry);
         } else {
             LWARNING << "Warning: unknown flag: " << flag;
         }
@@ -844,6 +862,14 @@ bool ReadDefaultFstab(Fstab* fstab) {
 std::vector<FstabEntry*> GetEntriesForMountPoint(Fstab* fstab, const std::string& path) {
     return GetEntriesByPred(fstab,
                             [&path](const FstabEntry& entry) { return entry.mount_point == path; });
+}
+
+FstabEntry* GetEntryForMountPoint(Fstab* fstab, const std::string_view path,
+                                  const std::string_view fstype) {
+    auto&& vec = GetEntriesByPred(fstab, [&path, fstype](const FstabEntry& entry) {
+        return entry.mount_point == path && entry.fs_type == fstype;
+    });
+    return vec.empty() ? nullptr : vec.front();
 }
 
 std::vector<const FstabEntry*> GetEntriesForMountPoint(const Fstab* fstab,

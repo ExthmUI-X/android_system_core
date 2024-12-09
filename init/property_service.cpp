@@ -64,6 +64,8 @@
 #include <selinux/android.h>
 #include <selinux/label.h>
 #include <selinux/selinux.h>
+#include <vendorsupport/api_level.h>
+
 #include "debug_ramdisk.h"
 #include "epoll.h"
 #include "init.h"
@@ -114,7 +116,6 @@ constexpr auto ID_PROP = "ro.build.id";
 constexpr auto LEGACY_ID_PROP = "ro.build.legacy.id";
 constexpr auto VBMETA_DIGEST_PROP = "ro.boot.vbmeta.digest";
 constexpr auto DIGEST_SIZE_USED = 8;
-constexpr auto MAX_VENDOR_API_LEVEL = 1000000;
 
 static bool persistent_properties_loaded = false;
 
@@ -453,6 +454,10 @@ static uint32_t SendControlMessage(const std::string& msg, const std::string& na
                                    SocketConnection* socket, std::string* error) {
     auto lock = std::lock_guard{accept_messages_lock};
     if (!accept_messages) {
+        // If we're already shutting down and you're asking us to stop something,
+        // just say we did (https://issuetracker.google.com/336223505).
+        if (msg == "stop") return PROP_SUCCESS;
+
         *error = "Received control message after shutdown, ignoring";
         return PROP_ERROR_HANDLE_CONTROL_MESSAGE;
     }
@@ -970,6 +975,17 @@ static std::string ConstructBuildFingerprint(bool legacy) {
     std::string build_fingerprint = GetProperty("ro.product.brand", UNKNOWN);
     build_fingerprint += '/';
     build_fingerprint += GetProperty("ro.product.name", UNKNOWN);
+
+    // should be set in /product/etc/build.prop
+    // when we have a dev option device, and we've switched the kernel to 16kb mode
+    // we use the same system image, but we've switched out the kernel, so make it
+    // visible at a high level
+    bool has16KbDevOption =
+            android::base::GetBoolProperty("ro.product.build.16k_page.enabled", false);
+    if (has16KbDevOption && getpagesize() == 16384) {
+        build_fingerprint += "_16kb";
+    }
+
     build_fingerprint += '/';
     build_fingerprint += GetProperty("ro.product.device", UNKNOWN);
     build_fingerprint += ':';
@@ -1095,25 +1111,19 @@ static void property_initialize_ro_cpu_abilist() {
     }
 }
 
-static int vendor_api_level_of(int sdk_api_level) {
-    if (sdk_api_level < __ANDROID_API_V__) {
-        return sdk_api_level;
-    }
-    // In Android V, vendor API level started with version 202404.
-    // The calculation assumes that the SDK api level bumps once a year.
-    if (sdk_api_level < __ANDROID_API_FUTURE__) {
-        return 202404 + ((sdk_api_level - __ANDROID_API_V__) * 100);
-    }
-    return MAX_VENDOR_API_LEVEL;
-}
-
 static void property_initialize_ro_vendor_api_level() {
     // ro.vendor.api_level shows the api_level that the vendor images (vendor, odm, ...) are
     // required to support.
     constexpr auto VENDOR_API_LEVEL_PROP = "ro.vendor.api_level";
 
-    auto vendor_api_level = GetIntProperty("ro.board.first_api_level", MAX_VENDOR_API_LEVEL);
-    if (vendor_api_level != MAX_VENDOR_API_LEVEL) {
+    if (__system_property_find(VENDOR_API_LEVEL_PROP) != nullptr) {
+        // The device already have ro.vendor.api_level in its vendor/build.prop.
+        // Skip initializing the ro.vendor.api_level property.
+        return;
+    }
+
+    auto vendor_api_level = GetIntProperty("ro.board.first_api_level", __ANDROID_VENDOR_API_MAX__);
+    if (vendor_api_level != __ANDROID_VENDOR_API_MAX__) {
         // Update the vendor_api_level with "ro.board.api_level" only if both "ro.board.api_level"
         // and "ro.board.first_api_level" are defined.
         vendor_api_level = GetIntProperty("ro.board.api_level", vendor_api_level);
@@ -1126,7 +1136,14 @@ static void property_initialize_ro_vendor_api_level() {
         product_first_api_level = GetIntProperty("ro.build.version.sdk", __ANDROID_API_FUTURE__);
     }
 
-    vendor_api_level = std::min(vendor_api_level_of(product_first_api_level), vendor_api_level);
+    vendor_api_level =
+            std::min(AVendorSupport_getVendorApiLevelOf(product_first_api_level), vendor_api_level);
+
+    if (vendor_api_level < 0) {
+        LOG(ERROR) << "Unexpected vendor api level for " << VENDOR_API_LEVEL_PROP << ". Check "
+                   << "ro.product.first_api_level and ro.build.version.sdk.";
+        vendor_api_level = __ANDROID_VENDOR_API_MAX__;
+    }
 
     std::string error;
     auto res = PropertySetNoSocket(VENDOR_API_LEVEL_PROP, std::to_string(vendor_api_level), &error);
@@ -1310,12 +1327,14 @@ void CreateSerializedPropertyInfo() {
     }
     selinux_android_restorecon(PROP_TREE_FILE, 0);
 
+#ifdef WRITE_APPCOMPAT_OVERRIDE_SYSTEM_PROPERTIES
     mkdir(APPCOMPAT_OVERRIDE_PROP_FOLDERNAME, S_IRWXU | S_IXGRP | S_IXOTH);
     if (!WriteStringToFile(serialized_contexts, APPCOMPAT_OVERRIDE_PROP_TREE_FILE, 0444, 0, 0,
                            false)) {
         PLOG(ERROR) << "Unable to write appcompat override property infos to file";
     }
     selinux_android_restorecon(APPCOMPAT_OVERRIDE_PROP_TREE_FILE, 0);
+#endif
 }
 
 static void ExportKernelBootProps() {

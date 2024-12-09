@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 The Android Open Source Project
+ * Copyright (C) 2024 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,12 +16,10 @@
 
 #pragma once
 
-#include <property_info_parser/property_info_parser.h>
+namespace android::statssocket::lazy {
 
-namespace android {
-namespace init {
+// See if libstatssocket.so is available. Early processes relying on _lazy might not have access
+// to libstatssocket.so when they start before the StatsD APEX is available.
+bool IsAvailable();
 
-extern const android::properties::PropertyInfoArea* property_info_area;
-
-}  // namespace init
-}  // namespace android
+}  // namespace android::statssocket::lazy

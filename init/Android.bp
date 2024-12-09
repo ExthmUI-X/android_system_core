@@ -88,7 +88,6 @@ init_device_sources = [
 init_host_sources = [
     "check_builtins.cpp",
     "host_import_parser.cpp",
-    "host_init_verifier.cpp",
 ]
 
 cc_library_static {
@@ -105,6 +104,7 @@ soong_config_module_type {
     config_namespace: "ANDROID",
     bool_variables: [
         "PRODUCT_INSTALL_DEBUG_POLICY_TO_SYSTEM_EXT",
+        "release_write_appcompat_override_system_properties",
     ],
     properties: [
         "cflags",
@@ -168,11 +168,14 @@ libinit_cc_defaults {
                 "-DINSTALL_DEBUG_POLICY_TO_SYSTEM_EXT=1",
             ],
         },
+        release_write_appcompat_override_system_properties: {
+            cflags: ["-DWRITE_APPCOMPAT_OVERRIDE_SYSTEM_PROPERTIES"],
+        }
     },
     static_libs: [
         "libavb",
+        "libavf_cc_flags",
         "libbootloader_message",
-        "libc++fs",
         "libcgrouprc_format",
         "liblmkd_utils",
         "liblz4",
@@ -196,7 +199,6 @@ libinit_cc_defaults {
         "libfs_mgr",
         "libgsi",
         "libhidl-gen-utils",
-        "libkeyutils",
         "liblog",
         "liblogwrap",
         "liblp",
@@ -205,6 +207,7 @@ libinit_cc_defaults {
         "libselinux",
         "libunwindstack",
         "libutils",
+        "libvendorsupport",
     ],
     header_libs: ["bionic_libc_platform_headers"],
     bootstrap: true,
@@ -264,7 +267,11 @@ cc_library_static {
 
 cc_library_static {
     name: "libinit.microdroid",
-    defaults: ["libinit_defaults"],
+    defaults: [
+        "avf_build_flags_cc",
+        "libinit_defaults",
+    ],
+    recovery_available: false,
     cflags: ["-DMICRODROID=1"],
 }
 
@@ -282,6 +289,13 @@ cc_defaults {
     defaults: ["init_defaults"],
     srcs: ["main.cpp"],
     symlinks: ["ueventd"],
+}
+
+cc_binary {
+    name: "init_second_stage",
+    defaults: ["init_second_stage_defaults"],
+    static_libs: ["libinit"],
+    visibility: ["//visibility:any_system_partition"],
     target: {
         platform: {
             required: [
@@ -316,20 +330,17 @@ cc_defaults {
 }
 
 cc_binary {
-    name: "init_second_stage",
-    defaults: ["init_second_stage_defaults"],
-    static_libs: ["libinit"],
-}
-
-cc_binary {
     name: "init_second_stage.microdroid",
-    defaults: ["init_second_stage_defaults"],
+    defaults: [
+        "avf_build_flags_cc",
+        "init_second_stage_defaults",
+    ],
+    recovery_available: false,
     static_libs: ["libinit.microdroid"],
     cflags: ["-DMICRODROID=1"],
-    installable: false,
+    no_full_install: true,
     visibility: ["//packages/modules/Virtualization/microdroid"],
 }
-
 
 soong_config_module_type {
     name: "init_first_stage_cc_defaults",
@@ -368,8 +379,8 @@ init_first_stage_cc_defaults {
     ],
 
     static_libs: [
-        "libc++fs",
         "libfs_avb",
+        "libavf_cc_flags",
         "libfs_mgr",
         "libfec",
         "libfec_rs",
@@ -452,6 +463,7 @@ init_first_stage_cc_defaults {
 
         // First stage init is weird: it may start without stdout/stderr, and no /proc.
         hwaddress: false,
+        memtag_stack: false,
     },
 
     // Install adb_debug.prop into debug ramdisk.
@@ -470,9 +482,12 @@ cc_binary {
 
 cc_binary {
     name: "init_first_stage.microdroid",
-    defaults: ["init_first_stage_defaults"],
+    defaults: [
+        "avf_build_flags_cc",
+        "init_first_stage_defaults",
+    ],
     cflags: ["-DMICRODROID=1"],
-    installable: false,
+    no_full_install: true,
 }
 
 phony {
@@ -484,6 +499,7 @@ phony {
 // ------------------------------------------------------------------------------
 
 cc_test {
+    // Note: This is NOT a CTS test. See b/320800872
     name: "CtsInitTestCases",
     defaults: ["init_defaults"],
     require_root: true,
@@ -516,7 +532,6 @@ cc_test {
     ],
 
     test_suites: [
-        "cts",
         "device-tests",
     ],
 }
@@ -563,6 +578,11 @@ cc_library_static {
     ],
     export_include_dirs: ["test_utils/include"], // for tests
     header_libs: ["bionic_libc_platform_headers"],
+    product_variables: {
+        shipping_api_level: {
+            cflags: ["-DBUILD_SHIPPING_API_LEVEL=%s"],
+        },
+    },
 }
 
 // Host Verifier
@@ -608,7 +628,6 @@ cc_defaults {
     },
     generated_headers: [
         "generated_stub_builtin_function_map",
-        "generated_android_ids",
     ],
     target: {
         android: {
@@ -618,18 +637,26 @@ cc_defaults {
             enabled: false,
         },
     },
+    product_variables: {
+        shipping_api_level: {
+            cflags: ["-DBUILD_SHIPPING_API_LEVEL=%s"],
+        },
+    },
 }
 
 cc_binary {
     name: "host_init_verifier",
     defaults: ["init_host_defaults"],
-    srcs: init_common_sources + init_host_sources,
+    srcs: ["host_init_verifier.cpp"] + init_common_sources + init_host_sources,
+    generated_headers: [
+        "generated_android_ids",
+    ],
 }
 
 cc_library_host_static {
     name: "libinit_host",
     defaults: ["init_host_defaults"],
-    srcs: init_common_sources,
+    srcs: init_common_sources + init_host_sources,
     export_include_dirs: ["."],
     proto: {
         export_proto_headers: true,
